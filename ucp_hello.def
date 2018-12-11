@@ -1,0 +1,92 @@
+#- UCP hello world client / server example utility
+#- Server side: ./ucp_hello_world
+#- Client side: ./ucp_hello_world -n <server host name>
+#-     - Client acquires Server UCX address via TCP socket
+
+page: ucp_hello
+    $local char* client_target_name
+    # $fcall parse_cmd, argc, argv, &client_target_name
+
+    $call ucp_init
+    $call worker_init
+    $if client_target_name
+        $call oob_connect
+    $else
+        $call oob_listen
+
+    ret = run_test(client_target_name, ucp_worker)
+
+    subcode: ucp_init_param
+        $local ucp_config_t * config
+        $fcall ucp_config_read, NULL, NULL, &config
+
+        $local ucp_params_t ucp_params
+        memset(&ucp_params, 0, sizeof(ucp_params))
+        $call ucp_set, features, UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP
+        $call ucp_set, request_size, sizeof(struct ucx_context)
+        $call ucp_set, request_init, request_init
+
+        $local ucp_context_h ucp_context
+        $fcall ucp_init(&ucp_params, config, &ucp_context)
+
+        ucp_config_print(config, stdout, NULL, UCS_CONFIG_PRINT_CONFIG)
+        ucp_config_release(config)
+
+    subcode: worker_init
+        $local ucp_worker_params_t worker_params
+        memset(&worker_params, 0, sizeof(worker_params))
+        $call worker_set, thread_mode, UCS_THREAD_MODE_SINGLE
+
+        $local ucp_worker_h ucp_worker
+        $fcall ucp_worker_create(ucp_context, &worker_params, &ucp_worker)
+
+        $fcall ucp_worker_get_address(ucp_worker, &local_addr, &local_addr_len)
+
+    subcode: oob_connect
+        oob_sock = client_connect(client_target_name, server_port)
+        ret = recv(oob_sock, &addr_len, sizeof(addr_len), 0)
+        ret = recv(oob_sock, peer_addr, peer_addr_len, 0)
+
+    subcode: oob_listen
+        oob_sock = server_connect(server_port)
+        ret = send(oob_sock, &addr_len, sizeof(addr_len), 0)
+        ret = send(oob_sock, local_addr, local_addr_len, 0)
+
+    # ------------------
+    $call ucp_set(name, val)
+        ucp_params.field_mask |= UCP_PARAM_$(name:uc)
+        ucp_params.$(name) = $(val)
+
+    $call worker_set(name, val)
+        worker_params.field_mask |= UCP_WORKER_PARAM_FIELD_$(name:uc)
+        worker_params.$(name) = $(val)
+
+subcode: _autoload
+    $include <ucp/api/ucp.h>
+    $plugin fcall
+
+subcode: fcall(func, @args)
+    $local ucs_status_t status
+    status = $(func)($(args))
+    CHKERR_JUMP(status!=UCS_OK, "$(func)\n", err);
+
+#---------------------------------------- 
+subcode: _autoload
+    $register_name(argc) int
+    $register_name(argv) char **
+
+fncode: parse_cmd(argc, argv, ps_server_name)
+    $while (c=getopt(argc, argv, "wfben:p:s:h"))!=-1
+        $switch c
+            $(for:w,f,b and WAIT,EVENTFD,PROBE)
+                $of '$1'
+                    ucp_test_mode = TEST_MODE_$2
+            $of 'e'
+                # err_handling_opt
+            $of 'n'
+                *ps_server_name = optarg
+            $of 'p'
+                # server_port = atoi(optarg)
+            $of 's'
+                # test_string_length = atol(optarg)
+    return UCS_OK
