@@ -1,0 +1,64 @@
+include: c/mpi.def
+include: macros/ucp.def
+
+macros:
+    debug: 1
+
+page: test, mpi_frame
+    module: c
+    exe: mpiexec -np 2 out/test
+
+    # $print Hello world from $mpi_name, $mpi_id/$mpi_size
+    &call p2p_region, 0, 1
+        $call ucp_init
+        $call worker_init, worker
+        $call exchange_addr
+
+        $(if:debug)
+            $call dump_addr, ((unsigned char*)ucp_addr)
+            $call dump_addr, addr_buf
+
+        $local char send_buf[10]="1234"
+        $local char recv_buf[10]=""
+
+        $(if:is_p1)
+            $(set:print_to=stderr)
+            $call run_ucx_server
+        $(else)
+            $call run_ucx_client
+
+    subcode: exchange_addr
+        $local unsigned char addr_buf[1024]
+        $call worker_addr, worker
+        # $call dump_addr, ((unsigned char*)ucp_addr)
+        $call send_to, ucp_addr, addr_buf, ucp_addr_len, MPI_BYTE
+        $call send_back, ucp_addr, addr_buf, ucp_addr_len, MPI_BYTE
+
+    subcode: dump_addr(addr)
+        $print "[$mpi_id] %ld - %02x%02x%02x%02x", ucp_addr_len, $(addr)[0],$(addr)[1], $(addr)[2], $(addr)[3]
+
+macros:
+    datatype: ucp_dt_make_contig(1)
+    # tag: 0x1337a880u
+    tag: 1
+    tag_mask: -1
+    flag_remove: 1
+
+subcode: run_ucx_client
+    $call ep_create, worker, ep, (ucp_address_t *)addr_buf
+    $local struct ucx_context *req
+    req = ucp_tag_send_nb(ep, send_buf, 5, $(datatype), $(tag), send_handler)
+    $call ucp_wait_req, worker, req
+
+subcode: run_ucx_server
+    $(set:tag_mask=0)
+    $(set:tag_remove=0)
+    $call ucp_wait_msg, worker
+    # $print "got msg, tag = %p", msg_tag
+    $if info_tag.length<10
+        $local struct ucx_context *req
+        req = ucp_tag_msg_recv_nb(worker, recv_buf, info_tag.length, $(datatype), msg_tag, recv_handler)
+        $call ucp_wait_req, worker, req
+        $print "server got message: %s", recv_buf
+
+# -------------------------------------------------

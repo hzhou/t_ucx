@@ -1,0 +1,114 @@
+subcode: _autoload
+    $include <ucp/api/ucp.h>
+    $uselib ucp
+
+#---------------------------------------- 
+subcode: ucp_init
+    $local ucp_config_t * ucp_config
+    $ucp_call config_read, NULL, NULL, &ucp_config
+    # ucp_config_print(ucp_config, stdout, NULL, UCS_CONFIG_PRINT_CONFIG)
+    $(block:_post)
+        ucp_config_release(ucp_config)
+
+    $local ucp_params_t ucp_params
+    memset(&ucp_params, 0, sizeof(ucp_params))
+    $call ucp_set, features, UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP
+    $call @on_ucp_init
+
+    $local ucp_context_h ucp_context
+    # ----
+    $ucp_call init, &ucp_params, ucp_config, &ucp_context
+    # -------------------------
+    subcode: ucp_set(name, val)
+        ucp_params.field_mask |= UCP_PARAM_FIELD_$(name:uc)
+        ucp_params.$(name) = $(val)
+
+subcode: worker_init(worker)
+    $local ucp_worker_h $(worker)
+
+    $local ucp_worker_params_t worker_params
+    memset(&worker_params, 0, sizeof(worker_params))
+    $call worker_set, thread_mode, UCS_THREAD_MODE_SINGLE
+
+    $ucp_call worker_create, ucp_context, &worker_params, &$(worker)
+
+    # ---------------------------
+    subcode: worker_set(name, val)
+        worker_params.field_mask |= UCP_WORKER_PARAM_FIELD_$(name:uc)
+        worker_params.$(name) = $(val)
+
+
+subcode: worker_addr(worker)
+    # on linux/tcp: len=187
+    $global ucp_address_t * ucp_addr, size_t ucp_addr_len
+    $ucp_call worker_get_address, $(worker), &ucp_addr, &ucp_addr_len
+
+
+subcode: ep_create(worker, ep, addr)
+    $(set:P=UCP_EP_PARAM_FIELD_$1)
+    $local ucp_ep_params_t ep_params
+    ep_params.field_mask = $(P:REMOTE_ADDRESS)|$(P:ERR_HANDLING_MODE)
+    ep_params.address = $(addr)
+    ep_params.err_mode = UCP_ERR_HANDLING_MODE_NONE
+
+    $local ucp_ep_h $(ep)
+    $ucp_call ep_create, $(worker), &ep_params, &$(ep)
+
+subcode: ucp_wait_req(worker, req)
+    $if UCS_PTR_IS_ERR($(req))
+        $print "ucp_wait: req pointer is error!"
+        exit(1)
+    $elif UCS_PTR_STATUS($(req)) != UCS_OK
+        $while $(req)->completed==0
+            ucp_worker_progress($(worker))
+        $(req)->completed = 0
+        ucp_request_release($(req))
+    $else
+        # NOOP
+
+subcode: ucp_wait_msg(worker)
+    $local ucp_tag_message_h msg_tag
+    $local ucp_tag_recv_info_t info_tag
+    $while 1
+        msg_tag = ucp_tag_probe_nb($(worker), $(tag), $(tag_mask), $(flag_remove), &info_tag)
+        $if msg_tag
+            break
+        $elif ucp_worker_progress($(worker))
+            continue
+        $else
+            $ucp_call worker_wait, $(worker)
+
+#---- overwrite to customize ----
+subcode: _autoload
+    $plugin ucp_call
+
+subcode: ucp_call(func, @args)
+    $local int ret = UCS_OK
+    $local ucs_status_t ucp_ret
+    ucp_ret  = ucp_$(func)($(args))
+    $if ucp_ret != UCS_OK
+        $print "Failed: ucp_$(func)"
+        exit(1)
+
+#---------------------------------------- 
+subcode: _autoload
+    $struct(ucx_context) int completed
+    $list request_init, send_handler, recv_handler
+
+subcode:: on_ucp_init
+    $call ucp_set, request_size, sizeof(struct ucx_context)
+    $call ucp_set, request_init, request_init
+
+fncode: request_init(void* p)
+    $local ctx = (struct ucx_context *)p
+    ctx->completed = 0
+
+fncode: send_handler(void* req, ucs_status_t status)
+    $local struct ucx_context *context = (struct ucx_context *)req
+    context->completed = 1
+    # $print "[%d] send_handler: status %d", mpi_id, status
+
+fncode: recv_handler(void* req, ucs_status_t status, ucp_tag_recv_info_t *info)
+    $local struct ucx_context *context = (struct ucx_context *)req
+    context->completed = 1
+    # $print "[%d] recv_handler: status %d, size %lu", mpi_id, status, info->length
