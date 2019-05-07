@@ -6,7 +6,7 @@ macros:
 
 page: test, mpi_frame
     module: c
-    exe: mpiexec -np 2 out/test
+    exe: UCX_NET_DEVICES=mlx5_0:1 mpiexec -np 2 out/test
 
     # $print Hello world from $mpi_name, $mpi_id/$mpi_size
     &call p2p_region, 0, 1

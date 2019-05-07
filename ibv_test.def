@@ -1,0 +1,8 @@
+include: c/mpi.def
+include: macros/ibv.def
+
+page: test, basic_frame
+    module: c
+    # exe: mpiexec -np 2 out/test
+
+    $call query_ibv_devices

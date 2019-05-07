@@ -1,0 +1,44 @@
+subcode: _autoload
+    $include infiniband/verbs.h
+    $uselib ibverbs
+
+subcode: query_ibv_devices
+    $local struct ibv_device ** device_list, n_device_list
+    device_list = ibv_get_device_list(&n_device_list)
+    $if !device_list
+        $call die, "Error: ibv_get_device_list() failed"
+
+    $print $n_device_list ibv devices
+    $for i=0:n_device_list
+        $print "  $i: ibv device [%s] - %s", ibv_get_device_name(device_list[i]), ibv_node_type_str(device_list[i]->node_type)
+
+    $if n_device_list>0
+        $local struct ibv_context *ibv_ctx
+        ibv_ctx = ibv_open_device(device_list[0])
+        $if ibv_ctx
+            $call @query_ctx
+            ibv_close_device(ibv_ctx)
+        $else
+            $print "Error: ibv_open_device() failed"
+
+    ibv_free_device_list(device_list)
+
+    subcode: query_ctx
+        $print "num_comp_vectors: %d", ibv_ctx->num_comp_vectors
+        $print "async_fd: %d", ibv_ctx->async_fd
+
+        $local struct ibv_device_attr ibv_device_attr
+        ibv_query_device(ibv_ctx, &ibv_device_attr)
+        $(for:max_qp, max_qp_wr, max_mr_size, max_pkeys, phys_port_cnt)
+            $print "    $1: %d", ibv_device_attr.$1
+        
+        $local struct ibv_port_attr ibv_port_attr
+        ibv_query_port(ibv_ctx, 1, &ibv_port_attr)
+        $(for:pkey_tbl_len, max_mtu)
+            $print "    $1: %d", ibv_port_attr.$1
+
+        $local uint16_t pkey
+        $for i=0:ibv_port_attr.pkey_tbl_len
+            ibv_query_pkey(ibv_ctx, 1, i, &pkey)
+            $if pkey > 0
+                $print "pkey #$i: %x", pkey
