@@ -2,43 +2,208 @@ subcode: _autoload
     $include infiniband/verbs.h
     $uselib ibverbs
 
-subcode: query_ibv_devices
+subcode: ibv_open(i_device)
     $local struct ibv_device ** device_list, n_device_list
     device_list = ibv_get_device_list(&n_device_list)
     $if !device_list
         $call die, "Error: ibv_get_device_list() failed"
 
-    $print $n_device_list ibv devices
-    $for i=0:n_device_list
-        $print "  $i: ibv device [%s] - %s", ibv_get_device_name(device_list[i]), ibv_node_type_str(device_list[i]->node_type)
+    $if n_device_list<$(i_device)
+        $call die, "ibv device #$(i_device) not exist"
 
-    $if n_device_list>0
-        $local struct ibv_context *ibv_ctx
-        ibv_ctx = ibv_open_device(device_list[0])
-        $if ibv_ctx
-            $call @query_ctx
-            ibv_close_device(ibv_ctx)
-        $else
-            $print "Error: ibv_open_device() failed"
+    $global struct ibv_context * g_ibv_ctx
+    g_ibv_ctx = ibv_open_device(device_list[$(i_device)])
+    $if !g_ibv_ctx
+        $call die, "Failed to open ibv device #$(i_device)"
+
+    $call @query_device_list
 
     ibv_free_device_list(device_list)
 
+subcode: ibv_close
+    ibv_close_device(g_ibv_ctx)
+
+# -------------------
+subcode: ibv_alloc_pd
+    $global struct ibv_pd * g_ibv_pd
+    g_ibv_pd = ibv_alloc_pd(g_ibv_ctx)
+    $if !g_ibv_pd
+        $call die, "Failed to allocate g_ibv_pd"
+
+subcode: ibv_dealloc_pd
+    ibv_dealloc_pd(g_ibv_pd)
+
+# -------------------
+subcode: ibv_reg_mr(p, size)
+    $local struct ibv_mr * g_ibv_mr
+    $(set:flag=IBV_ACCESS_LOCAL_WRITE)
+    g_ibv_mr = ibv_reg_mr(g_ibv_pd, $(p), $(size), $(flag))
+    $if !g_ibv_mr
+        $call die, "Failed: ibv_reg_mr"
+
+subcode: ibv_dereg_mr
+    ibv_dereg_mr(g_ibv_mr)
+
+# -------------------
+subcode: ibv_create_comp_channel
+    $local struct ibv_comp_channel * g_ibv_chan
+    g_ibv_chan = ibv_create_comp_channel(g_ibv_ctx)
+    $if !g_ibv_chan
+        $call die, "Failed: ibv_create_comp_channel"
+
+subcode: ibv_destroy_comp_channel
+    ibv_destroy_comp_channel(g_ibv_chan)
+
+# -------------------
+subcode: ibv_create_cq
+    $local struct ibv_cq * g_ibv_cq
+    g_ibv_cq = ibv_create_cq(g_ibv_ctx, 1024, NULL, g_ibv_chan, 0)
+    $if !g_ibv_cq
+        $call die, "Failed: ibv_create_cq"
+
+subcode: ibv_destroy_cq
+    ibv_destroy_cq(g_ibv_cq)
+
+# -------------------
+subcode: ibv_create_qp
+    $local struct ibv_qp * g_ibv_qp
+    struct ibv_qp_init_attr init_attr = {
+        .send_cq = g_ibv_cq,
+        .recv_cq = g_ibv_cq,
+        .cap = {
+            .max_send_wr = 1,
+            .max_recv_wr = rx_depth, 
+            .max_send_sge = 1,
+            .max_recv_sge = 1 },
+        .qp_type = IBV_QPT_RC,
+    };
+
+    g_ibv_qp = ibv_create_qp(g_ibv_pd, &init_attr)
+    $if !g_ibv_qp
+        $call die, "Failed: ibv_create_qp"
+
+subcode: ibv_destroy_qp
+    ibv_destroy_qp(g_ibv_qp)
+
+subcode: modify_qp_init
+    &call modify_qp, init
+        qp_attr = {
+            .qp_state = IBV_QPS_INIT,
+            .pkey_index = 0,
+            .port_num = 1,
+            .qp_access_flags = $(join:IBV_ACCESS_*: | :LOCAL_WRITE,REMOTE_READ,REMOTE_ATOMIC,REMOTE_WRITE),
+        };
+        $(export:mask=IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)
+
+subcode: modify_qp_rtr
+    &call modify_qp, rtr
+        qp_attr = {
+            .qp_state = IBV_QPS_RTR,
+            .path_mtu = IBV_MTU_4096,
+            .dest_qp_num = remote_qp_info.qp_num
+            .rq_psn = 0,
+            .max_dest_rd_atomic = 1,
+            .min_rnr_timer = 12,
+            .at_attr = {
+                .is_global = 0,
+                .dlid = remote_qp_info.lid,
+                .sl = 0,
+                .src_path_bits = 0,
+                .port_num = 1 },
+        };
+        $(export:mask=IBV_QP_STATE|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN|IBV_QP_MAX_DEST_RD_ATOMIC|IBV_QP_MIN_RNR_TIMER|IBV_QP_AV)
+
+subcode: modify_qp_rts
+    &call modify_qp, rts
+        qp_attr = {
+            .qp_state = IBV_QPS_RTS,
+            .timeout = 14,
+            .retry_cnt = 7,
+            .rnr_retry = 7,
+            .sq_psn = 0,
+            .max_rd_atomic = 1,
+        };
+        $(export:mask=IBV_QP_STATE|IBV_QP_TIMEOUT|IBV_QP_RETRY_CNT|IBV_QP_RNR_RETRY|IBV_QP_SQ_PSN|IBV_QP_MAX_QP_RD_ATOMIC)
+
+subcode: modify_qp(state)
+    $local struct ibv_qp_attr
+    BLOCK
+    tn_ret = ibv_modify_qp(g_ibv_qp, &qp_attr, $(mask))
+    $if tn_ret
+        $call die, "Failed to modify_qp to state $(state)"
+
+# -------------------
+subcode: ibv_query_port(i_port)
+    $(set:attr=ibv_port_attr)
+    $local struct ibv_port_attr $(attr)
+    ibv_query_port($(ctx), $(i_port), &$(attr))
+    BLOCK
+
+#---------------------------------------- 
+subcode: ibv_post_wr(buf, size, send)
+    $local struct ibv_sge sg_list
+    sg_list = {
+        .addr = $(buf),
+        .length = $(size),
+        .lkey = g_ibv_mr->lkey,
+    };
+    $local struct ibv_$(send)_wr wr
+    wr = {
+        .next = NULL,
+        .sg_list = &sg_list,
+        .num_sge = 1,
+        $(if:send=send)
+            .opcode = IBV_WR_SEND,
+    };
+    $local struct ibv_$(send)_wr *p_bad_wr
+    tn_ret = ibv_post_$(send)(g_ibv_qp, &wr, &p_bad_wr)
+    $if tn_ret
+        $call die, "Error: ibv_post_$(send)"
+
+subcode: ibv_send(buf, size)
+    $call ibv_post_wr, $(buf), $(size), send
+
+subcode: ibc_recv(buf, size)
+    $call ibv_post_wr, $(buf), $(size), recv
+
+#---------------------------------------- 
+subcode: query_ibv_devices
+    $call ibv_open, 0
+    $(set:ctx=g_ibv_ctx)
+    $call @query_ctx
+    &call @query_port, 1
+        $print "  Port $(i_port)"
+        $(for:lid, gid_tbl_len, pkey_tbl_len, max_mtu)
+            $print "    $1: %d", ibv_port_attr.$1
+    $call @query_gid
+    $call @query_pkey
+    $call ibv_close
+
+    subcode: query_device_list
+        $print $n_device_list ibv devices
+        $for i=0:n_device_list
+            $print "  $i: ibv device [%s] - %s", ibv_get_device_name(device_list[i]), ibv_node_type_str(device_list[i]->node_type)
+
     subcode: query_ctx
-        $print "num_comp_vectors: %d", ibv_ctx->num_comp_vectors
-        $print "async_fd: %d", ibv_ctx->async_fd
+        $print "num_comp_vectors: %d", $(ctx)->num_comp_vectors
+        $print "async_fd: %d", $(ctx)->async_fd
 
         $local struct ibv_device_attr ibv_device_attr
-        ibv_query_device(ibv_ctx, &ibv_device_attr)
+        ibv_query_device($(ctx), &ibv_device_attr)
+        $print "  Node GUID: %p", ibv_device_attr.node_guid
         $(for:max_qp, max_qp_wr, max_mr_size, max_pkeys, phys_port_cnt)
             $print "    $1: %d", ibv_device_attr.$1
         
-        $local struct ibv_port_attr ibv_port_attr
-        ibv_query_port(ibv_ctx, 1, &ibv_port_attr)
-        $(for:pkey_tbl_len, max_mtu)
-            $print "    $1: %d", ibv_port_attr.$1
-
+    subcode: query_pkey
         $local uint16_t pkey
         $for i=0:ibv_port_attr.pkey_tbl_len
-            ibv_query_pkey(ibv_ctx, 1, i, &pkey)
+            ibv_query_pkey($(ctx), 1, i, &pkey)
             $if pkey > 0
                 $print "pkey #$i: %x", pkey
+
+    subcode: query_gid
+        $local union ibv_gid gid
+        $for i=0:ibv_port_attr.gid_tbl_len
+            int _ret = ibv_query_gid($(ctx), 1, i, &gid);
+            $if _ret==0
+                $print "gid #$i: $(x16:%02x)", $(join:gid.raw[*]:,:0-15)
