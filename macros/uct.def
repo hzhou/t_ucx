@@ -1,0 +1,78 @@
+subcode: uct_init
+    $local uct_iface_attr_t if_attr
+    $local uct_iface_h g_uct_iface
+    $local uct_md_h g_uct_md
+    $local uct_worker_h g_uct_worker
+
+    $local ucs_async_context_t ctx
+    $fcall ucs_async_context_create(UCS_ASYNC_MODE_THREAD, &ctx)
+    $fcall uct_worker_create(ctx, UCS_THREAD_MODE_SINGLE, &g_uct_worker)
+
+    $call dev_tl_lookup
+
+    $local uct_device_addr_t * own_dev
+    $allocate(1,0) own_dev
+    $fcall uct_iface_get_device_address(g_uct_iface, own_dev)
+
+    subcode: dev_tl_lookup
+        $my uct_md_resource_desc_t *md_res, n_md_res
+        $fcall uct_query_md_resources(&md_res, &n_md_res)
+        $for i=0:n_md_res
+            &call uct_md_config_read, md_res[i].md_name
+                $fcall uct_md_open(md_res[i].md_name, md_config, &g_uct_md)
+
+            $my uct_tl_resource_desc_t *tl_res, n_tl_res
+            $fcall uct_md_query_tl_resources(if_info.pd, &tl_res, &n_tl_res)
+            $for j=0:n_tl_res
+                $if tl_res[j].dev_name $eq s_dev_name && tl_res[j].tl_name $eq s_tl_name
+                    $call init_iface, tl_res[j].tl_name, tl_res[j].dev_name
+            uct_release_tl_resource_list(tl_res)
+            uct_md_close(if_info.pd)
+        iface_ok:
+        uct_release_md_resource_list(md_resources)
+
+
+    subcode: init_iface(tl_name, dev_name)
+        uct_iface_params_t params = {
+            .open_mode = UCT_IFACE_OPEN_MODE_DEVICE,
+            .mode.device.tl_name = $(tl_name)
+            .mode.device.dev_name = $(dev_name)
+            .stats_root = NULL,
+            .rx_headroom = sizeof(recv_desc_t),
+        };
+        UCS_CPU_ZERO(&params.cpu_mask)
+
+        $my uct_iface_config_t *p_config
+        &call uct_md_iface_config_read, g_uct_md, $(tl_name)
+            $fcall uct_iface_open(g_uct_md, g_uct_worker, &params, $(config), &g_uct_iface)
+        uct_iface_progress_enable(g_uct_iface, UCT_PROGRESS_SEND|UCT_PROGRESS_RECV)
+        $fcall uct_iface_query(g_uct_iface, &if_attr)
+        $(for:AM_SHORT,AM_BCOPY,AM_ZCOPY)
+            $if $(ftype)==FUNC_$1 && g_uct_iface.cap.flags & UCT_IFACE_FLAG_$1
+                goto iface_ok
+        uct_iface_close(g_uct_iface)
+
+    subcode: uct_md_config_read(name)
+        $my uct_md_config_t * md_config
+        $fcall uct_md_config_read(md_res[i].md_name, NULL, NULL, &md_config)
+        BLOCK
+        uct_config_release(md_config)
+
+    subcode: uct_md_iface_config_read(md, tl_name)
+        $(set:config=if_config)
+        $my uct_iface_config_t * $(config)
+        $fcall uct_md_iface_config_read($(md), $(tl_name), NULL, NULL, &$(config))
+        BLOCK
+        uct_config_release($(config))
+        BLOCK
+        uct_config_release(md_config)
+
+#---------------------------------------- 
+subcode: _autoload
+    $plugin fcall
+
+subcode: fcall(@F)
+    tn_ret = $(F)
+    $if tn_ret != UCS_OK
+        $call die, $(F)
+    

@@ -1,5 +1,5 @@
 include: c/mpi.def
-include: macros/ucp.def
+include: macros/uct.def
 
 macros:
     debug: 1
@@ -10,7 +10,7 @@ page: test, mpi_frame
 
     # $print Hello world from $mpi_name, $mpi_id/$mpi_size
     &call p2p_region, 0, 1
-        $call ucp_init
+        $call uct_init
         $call worker_init, worker
         $call exchange_addr
 
