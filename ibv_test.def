@@ -3,60 +3,34 @@ include: macros/ibv.def
 
 page: test, mpi_frame
     module: c
-    exe: mpiexec -np 1 out/test
+    exe: mpiexec -np 2 out/test
 
     # $call query_ibv_devices
     $call test_p2p
 
 subcode: test_p2p
+    setvbuf(stdout, NULL, _IONBF, 0)
+
     $call ibv_init
     &call p2p_region, 0, 1
-        $call exchange, local_qp_info, remote_qp_info, sizeof(struct QPInfo)
+        $call exchange, &local_qp_info, &remote_qp_info, sizeof(struct QPInfo)
+        $print "local: %d - %d; remote: %d - %d", local_qp_info.lid, local_qp_info.qp_number, remote_qp_info.lid, remote_qp_info.qp_number
+
         $call modify_qp_init
         $call modify_qp_rtr
         $call modify_qp_rts
         $(if:is_p1)
-            $local int msg = 1234
-            $call ibv_send, &msg, sizeof(int)
+            $my int msg = 1234
+            memcpy($(mr_buf), &msg, sizeof(int))
+            $call ibv_send, $(mr_buf), sizeof(int)
         $(else)
-            $local int msg = 0
-            $call ibv_recv, &msg, sizeof(int)
-        $my struct wc wc
-        $my int tn_comp = 0
-        $while tn_comp == 0
-            tn_comp = ibv_poll_cq(g_ibv_cq, 1, &wc)
-        $if tn_comp < 0
-            $call die, "Failed: ibv_poll_cq"
-        $if wc.status != IBV_WC_SUCCESS
-            $call die, "Error: ibv_poll_cq return failure"
+            $call ibv_recv, $(mr_buf), sizeof(int)
+
+        $call ibv_poll_cq
 
         $(if:is_p2)
+            $my int msg = 0
+            msg = *((int *)$(mr_buf))
             $print Received msg = $msg
 
-
-subcode: ibv_init
-    $(set:ctx=g_ibv_ctx)
-    $(set:qp=g_ibv_qp)
-    $call ibv_open, 0
-    $call ibv_alloc_pd
-    $global char g_ibv_dma[1024]
-    $call ibv_reg_mr, g_ibv_dma, 1024
-    $call ibv_create_comp_channel
-    $call ibv_create_cq
-    $call ibv_create_qp
-
-    $struct(QPInfo) uint16_t lid, uint32_t qp_number
-    $local struct QPInfo local_qp_info
-    &call ibv_query_port, 1
-        local_qp_info.lid = $(attr).lid
-        local_qp_info.qp_num = $(qp).qp_num
-
-
-subcode: ibv_finish
-    $call ibv_destroy_qp
-    $call ibv_destroy_cq
-    $call ibv_destroy_comp_channel
-    $call ibv_dereg_mr
-    $call ibv_dealloc_pd
-    $call ibv_close
 

@@ -1,57 +1,108 @@
+subcode: _autoload
+    $include <uct/api/uct.h>
+    $uselib uct, ucs, ucm
+
+    $struct(rx_head) int is_uct_desc
+
+macros:
+    dev_name: "mlx5_0:1"
+    tl_name: "rc"
+    # tl_name: ud
+    am_type: AM_SHORT
+
+    ctx: g_uct_ctx
+    worker: g_uct_worker
+    iface: g_uct_iface
+    if_attr: g_uct_if_attr
+    md: g_uct_md
+    ep: g_uct_ep
+    id: 0
+
 subcode: uct_init
-    $local uct_iface_attr_t if_attr
-    $local uct_iface_h g_uct_iface
-    $local uct_md_h g_uct_md
-    $local uct_worker_h g_uct_worker
+    $local uct_iface_h $(iface)
+    $local uct_iface_attr_t $(if_attr)
+    $local uct_md_h $(md)
 
-    $local ucs_async_context_t ctx
-    $fcall ucs_async_context_create(UCS_ASYNC_MODE_THREAD, &ctx)
-    $fcall uct_worker_create(ctx, UCS_THREAD_MODE_SINGLE, &g_uct_worker)
+    s_dev_name = $(dev_name)
+    s_tl_name = $(tl_name)
 
-    $call dev_tl_lookup
+    $local ucs_async_context_t *$(ctx)
+    $fcall ucs_async_context_create(UCS_ASYNC_MODE_THREAD, &$(ctx))
 
-    $local uct_device_addr_t * own_dev
-    $allocate(1,0) own_dev
-    $fcall uct_iface_get_device_address(g_uct_iface, own_dev)
+    $local uct_worker_h $(worker)
+    $fcall uct_worker_create($(ctx), UCS_THREAD_MODE_SINGLE, &$(worker))
 
-    subcode: dev_tl_lookup
+    $call open_uct_device, s_dev_name, s_tl_name
+    $print open_uct_device SUCCESSFUL
+
+    subcode: open_uct_device(dev, tl)
         $my uct_md_resource_desc_t *md_res, n_md_res
         $fcall uct_query_md_resources(&md_res, &n_md_res)
-        $for i=0:n_md_res
-            &call uct_md_config_read, md_res[i].md_name
-                $fcall uct_md_open(md_res[i].md_name, md_config, &g_uct_md)
-
-            $my uct_tl_resource_desc_t *tl_res, n_tl_res
-            $fcall uct_md_query_tl_resources(if_info.pd, &tl_res, &n_tl_res)
-            $for j=0:n_tl_res
-                $if tl_res[j].dev_name $eq s_dev_name && tl_res[j].tl_name $eq s_tl_name
-                    $call init_iface, tl_res[j].tl_name, tl_res[j].dev_name
-            uct_release_tl_resource_list(tl_res)
-            uct_md_close(if_info.pd)
+        # $call @dump_md_resources
+        $call try_init_iface
+        $call die, "open device [%s - %s] failed", s_dev_name, s_tl_name
         iface_ok:
-        uct_release_md_resource_list(md_resources)
 
+        subcode: try_init_iface
+            $for i=0:n_md_res
+                &call uct_md_config_read, md_res[i].md_name
+                    $fcall uct_md_open(md_res[i].md_name, md_config, &$(md))
 
-    subcode: init_iface(tl_name, dev_name)
-        uct_iface_params_t params = {
-            .open_mode = UCT_IFACE_OPEN_MODE_DEVICE,
-            .mode.device.tl_name = $(tl_name)
-            .mode.device.dev_name = $(dev_name)
-            .stats_root = NULL,
-            .rx_headroom = sizeof(recv_desc_t),
-        };
-        UCS_CPU_ZERO(&params.cpu_mask)
+                $my uct_tl_resource_desc_t *tl_res, n_tl_res
+                $fcall uct_md_query_tl_resources($(md), &tl_res, &n_tl_res)
+                $for j=0:n_tl_res
+                    $if tl_res[j].dev_name $eq $(dev) && tl_res[j].tl_name $eq $(tl)
+                        $call init_iface, tl_res[j].dev_name, tl_res[j].tl_name
+                uct_release_tl_resource_list(tl_res)
+                uct_md_close($(md))
+            uct_release_md_resource_list(md_res)
 
-        $my uct_iface_config_t *p_config
-        &call uct_md_iface_config_read, g_uct_md, $(tl_name)
-            $fcall uct_iface_open(g_uct_md, g_uct_worker, &params, $(config), &g_uct_iface)
-        uct_iface_progress_enable(g_uct_iface, UCT_PROGRESS_SEND|UCT_PROGRESS_RECV)
-        $fcall uct_iface_query(g_uct_iface, &if_attr)
-        $(for:AM_SHORT,AM_BCOPY,AM_ZCOPY)
-            $if $(ftype)==FUNC_$1 && g_uct_iface.cap.flags & UCT_IFACE_FLAG_$1
+            subcode: iface_ok
+                uct_release_md_resource_list(md_res)
                 goto iface_ok
-        uct_iface_close(g_uct_iface)
 
+        subcode: dump_md_resources
+            $(set:md=t_uct_md)
+            $my uct_md_h $(md)
+
+            $dump n_md_res
+            $for i=0:n_md_res
+                &call uct_md_config_read, md_res[i].md_name
+                    $fcall uct_md_open(md_res[i].md_name, md_config, &$(md))
+                $my uct_tl_resource_desc_t *tl_res, n_tl_res
+                $fcall uct_md_query_tl_resources($(md), &tl_res, &n_tl_res)
+                $print "$i: %s - $n_tl_res tl-resources", md_res[i].md_name
+                $for j=0:n_tl_res
+                    $print "    $j - %s - %s", tl_res[j].dev_name, tl_res[j].tl_name
+                uct_release_tl_resource_list(tl_res)
+                uct_md_close($(md))
+
+    # --------------------------------
+    subcode: init_iface(dev, tl)
+        &call uct_md_iface_config_read, $(md), $(tl)
+            $call set_iface_param
+            $fcall uct_iface_open($(md), $(worker), &params, $(config), &$(iface))
+        uct_iface_progress_enable($(iface), UCT_PROGRESS_SEND|UCT_PROGRESS_RECV)
+        $fcall uct_iface_query($(iface), &$(if_attr))
+        # $print check iface cap: $(am_type)...
+        $if $(if_attr).cap.flags & UCT_IFACE_FLAG_$(am_type)
+            $call @iface_ok
+        uct_iface_close($(iface))
+        # ----------------------
+        subcode: set_iface_param
+            uct_iface_params_t params = {
+                .open_mode = UCT_IFACE_OPEN_MODE_DEVICE,
+                .mode.device = {
+                    .dev_name = $(dev),
+                    .tl_name = $(tl),
+                },
+                .stats_root = NULL,
+                .rx_headroom = sizeof(struct rx_head),
+            };
+            UCS_CPU_ZERO(&params.cpu_mask)
+            params.field_mask = $(join:UCT_IFACE_PARAM_FIELD_$1:|:OPEN_MODE,DEVICE,STATS_ROOT,RX_HEADROOM,CPU_MASK)
+
+    # --------------------------------
     subcode: uct_md_config_read(name)
         $my uct_md_config_t * md_config
         $fcall uct_md_config_read(md_res[i].md_name, NULL, NULL, &md_config)
@@ -64,8 +115,122 @@ subcode: uct_init
         $fcall uct_md_iface_config_read($(md), $(tl_name), NULL, NULL, &$(config))
         BLOCK
         uct_config_release($(config))
+
+#---------------------------------------- 
+subcode: uct_finish
+    uct_ep_destroy($(ep))
+    uct_iface_close($(iface))
+    uct_md_close($(md))
+    uct_worker_destroy($(worker))
+    ucs_async_context_destroy($(ctx))
+
+#---------------------------------------- 
+subcode: setup_local_addr
+    $(for:device,iface,ep)
+        $my int n_$1_addr_len = $(if_attr).$1_addr_len
+        $my uct_$1_addr_t *p_local_$1 = calloc(1, n_$1_addr_len)
+        $my uct_$1_addr_t *p_remote_$1 = calloc(1, n_$1_addr_len)
+    $fcall uct_iface_get_device_address($(iface), p_local_device)
+    $fcall uct_iface_get_address($(iface), p_local_iface)
+
+subcode: uct_create_ep_connect
+    uct_ep_params_t ep_params = {
+        .iface = $(iface),
+        .field_mask = UCT_EP_PARAM_FIELD_IFACE,
+    };
+
+    $local uct_ep_h $(ep)
+    $fcall uct_ep_create(&ep_params, &$(ep))
+    $fcall uct_ep_get_address($(ep), p_local_ep)
+    BLOCK
+    $fcall uct_ep_connect_to_ep($(ep), p_remote_device, p_remote_ep)
+
+subcode: uct_create_ep_iface
+    uct_ep_params_t ep_params = {
+        .iface = $(iface),
+        .dev_addr = p_remote_device,
+        .iface_addr = p_remote_iface,
+        .field_mask = $(join:UCT_EP_PARAM_FIELD_$1:|:IFACE,DEV_ADDR,IFACE_ADDR),
+    };
+
+    $local uct_ep_h $(ep)
+    $fcall uct_ep_create(&ep_params, &$(ep))
+
+#---------------------------------------- 
+subcode: uct_am_set_handler(handler)
+    $fcall uct_iface_set_am_handler($(iface), $(id), $(handler), NULL, 0)
+
+subcode: uct_worker_progress
+    uct_worker_progress($(worker))
+
+#---------------------------------------- 
+subcode: uct_send_
+    tn_ret = UCS_ERR_NO_RESOURCE
+    $while tn_ret == UCS_ERR_NO_RESOURCE
         BLOCK
-        uct_config_release(md_config)
+        uct_worker_progress($(worker))
+
+#---------------------------------------- 
+subcode: uct_send_am_int(n)
+    &call uct_send_
+        tn_ret = uct_ep_am_short($(ep),$(id), (uint64_t)$(n), NULL, 0)
+
+subcode: uct_send_am(msg, size)
+    $my uint64_t header = *((uint64_t*)$(msg))
+    $my char * payload, int len
+    $if $(size)>8
+        payload = $(msg)+8
+        len = $(size)-8
+    $else
+        payload = NULL
+        len = 0
+
+    &call uct_send_
+        tn_ret = uct_ep_am_short($(ep),$(id), header, payload, len)
+
+#---------------------------------------- 
+subcode: uct_bcopy_int(n)
+    $list am_bcopy_cb
+    &call uct_send_
+        tn_ret = uct_ep_am_bcopy($(ep),$(id), am_bcopy_cb, &$(n), 0)
+
+fncode: am_bcopy_cb(void *p_dst, void *arg): size_t
+    $print am_bcopy_cb: copying 4 bytes...
+    memcpy(p_dst, arg, sizeof(int))
+    return sizeof(int)
+
+#---------------------------------------- 
+subcode: uct_zcopy_int(n)
+    $list am_zcopy_cb
+
+    $my uct_mem_h memh
+    $fcall uct_md_mem_reg($(md), &$(n), sizeof(int), UCT_MD_MEM_ACCESS_RMA, &memh)
+    uct_iov_t iov = {
+        .buffer = &$(n),
+        .length = sizeof(int),
+        .memh   = memh,
+        .stride = 0,
+        .count  = 1,
+    };
+
+    uct_completion_t comp = {
+        .func = am_zcopy_cb,
+        .count = 1,
+    };
+    &call uct_send_
+        tn_ret = uct_ep_am_zcopy($(ep),$(id),NULL,0,&iov,1, 0, &comp)
+    $if tn_ret == UCS_INPROGRESS
+        $while !zcopy_completed
+            uct_worker_progress($(worker))
+
+    $fcall uct_md_mem_dereg($(md), memh)
+
+fncode: am_zcopy_cb(uct_completion_t *comp, ucs_status_t status)
+    $print am_zcopy_cb: setting success...
+    $include assert
+    assert(comp->count==0 && status==UCS_OK)
+    $global int zcopy_completed = 0
+    zcopy_completed = 1
 
 #---------------------------------------- 
 subcode: _autoload

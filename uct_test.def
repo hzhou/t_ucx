@@ -6,58 +6,70 @@ macros:
 
 page: test, mpi_frame
     module: c
-    exe: UCX_NET_DEVICES=mlx5_0:1 mpiexec -np 2 out/test
+    exe: mpiexec -np 2 out/test
+    am_type: AM_ZCOPY
 
     # $print Hello world from $mpi_name, $mpi_id/$mpi_size
+    $call uct_init
     &call p2p_region, 0, 1
-        $call uct_init
-        $call worker_init, worker
-        $call exchange_addr
-
-        $(if:debug)
-            $call dump_addr, ((unsigned char*)ucp_addr)
-            $call dump_addr, addr_buf
-
-        $local char send_buf[10]="1234"
-        $local char recv_buf[10]=""
-
+        $call setup_local_addr
+        $call connect_uct_ep
+        $list msg_handler
+        $call uct_am_set_handler, msg_handler
         $(if:is_p1)
-            $(set:print_to=stderr)
-            $call run_ucx_server
+            $my int msg = 1234
+            $(if:am_type=AM_SHORT)
+                $call uct_send_am_int, msg
+            $(elif:am_type=AM_BCOPY)
+                $call uct_bcopy_int, msg
+            $(elif:am_type=AM_ZCOPY)
+                $call uct_zcopy_int, msg
         $(else)
-            $call run_ucx_client
+            $my int msg = 0
+            $while !desc_holder
+                $call uct_worker_progress
+            msg = *((int *)(desc_holder+1))
+            $print "Got msg: $msg"
 
-    subcode: exchange_addr
-        $local unsigned char addr_buf[1024]
-        $call worker_addr, worker
-        # $call dump_addr, ((unsigned char*)ucp_addr)
-        $call exchange, ucp_addr, addr_buf, ucp_addr_len
+            $if desc_holder->is_uct_desc
+                uct_iface_release_desc(desc_holder)
+            $else
+                free(desc_holder)
+
+    $call uct_finish
+
+    subcode: connect_uct_ep
+        $if $(if_attr).cap.flags & UCT_IFACE_FLAG_CONNECT_TO_EP
+            &call uct_create_ep_connect
+                $call exch, device
+                $call exch, ep
+        $else
+            $call exch, device
+            $call exch, iface
+            $call uct_create_ep_iface
+
+        subcode: exch(a)
+            $call exchange, p_local_$(a), p_remote_$(a), n_$(a)_addr_len
 
     subcode: dump_addr(addr)
         $print "[$mpi_id] %ld - %02x%02x%02x%02x", ucp_addr_len, $(addr)[0],$(addr)[1], $(addr)[2], $(addr)[3]
 
-macros:
-    datatype: ucp_dt_make_contig(1)
-    # tag: 0x1337a880u
-    tag: 1
-    tag_mask: -1
-    flag_remove: 1
-
-subcode: run_ucx_client
-    $call ep_create, worker, ep, (ucp_address_t *)addr_buf
-    $local struct ucx_context *req
-    req = ucp_tag_send_nb(ep, send_buf, 5, $(datatype), $(tag), send_handler)
-    $call ucp_wait_req, worker, req
-
-subcode: run_ucx_server
-    $(set:tag_mask=0)
-    $(set:tag_remove=0)
-    $call ucp_wait_msg, worker
-    # $print "got msg, tag = %p", msg_tag
-    $if info_tag.length<10
-        $local struct ucx_context *req
-        req = ucp_tag_msg_recv_nb(worker, recv_buf, info_tag.length, $(datatype), msg_tag, recv_handler)
-        $call ucp_wait_req, worker, req
-        $print "server got message: %s", recv_buf
-
 # -------------------------------------------------
+
+fncode: msg_handler(void *arg, void *data, size_t length, unsigned flags): static ucs_status_t
+    $print "[callback] sent %d bytes: %d", length, *((int *)data)
+    $global struct rx_head * desc_holder = NULL
+    # What is the significance? allow early processing message?
+    $if flags & UCT_CB_PARAM_FLAG_DESC
+        $my struct rx_head * rhead = data
+        rhead -= 1
+        rhead->is_uct_desc = 1
+        desc_holder = rhead
+        return UCS_INPROGRESS
+    $else
+        $global struct rx_head * g_rhead
+        g_rhead = malloc(sizeof(struct rx_head) + length)
+        g_rhead->is_uct_desc = 0
+        memcpy(g_rhead+1, data, length)
+        desc_holder = g_rhead
+        return UCS_OK

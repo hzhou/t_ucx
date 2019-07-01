@@ -6,6 +6,7 @@ macros:
 
 page: test, mpi_frame
     module: c
+    CC: gcc -std=c99 -g -L$HOME/MPI/lib
     exe: UCX_NET_DEVICES=mlx5_0:1 mpiexec -np 2 out/test
 
     # $print Hello world from $mpi_name, $mpi_id/$mpi_size
@@ -34,7 +35,7 @@ page: test, mpi_frame
         $call exchange, ucp_addr, addr_buf, ucp_addr_len
 
     subcode: dump_addr(addr)
-        $print "[$mpi_id] %ld - %02x%02x%02x%02x", ucp_addr_len, $(addr)[0],$(addr)[1], $(addr)[2], $(addr)[3]
+        $print "[$mpi_id] $(addr) = %ld - %02x%02x%02x%02x", ucp_addr_len, $(addr)[0],$(addr)[1], $(addr)[2], $(addr)[3]
 
 macros:
     datatype: ucp_dt_make_contig(1)

@@ -1,7 +1,44 @@
+# ref: https://github.com/linux-rdma/rdma-core:libibverbs/verbs.h
 subcode: _autoload
     $include infiniband/verbs.h
     $uselib ibverbs
 
+macros:
+    ctx:g_ibv_ctx
+    pd: g_ibv_pd
+    mr_buf: g_ibv_mr_buf
+    mr: g_ibv_mr
+    compchan: g_ibv_chan
+    cq: g_ibv_cq
+    qp: g_ibv_qp
+
+#---------------------------------------- 
+subcode: ibv_init
+    $call ibv_open, 0
+    $call ibv_alloc_pd
+    $global char g_ibv_mr_buf[1024]
+    $call ibv_reg_mr, g_ibv_mr_buf, 1024
+    $call ibv_create_comp_channel
+    $call ibv_create_cq
+    $call ibv_create_qp
+
+    $struct(QPInfo) uint16_t lid, uint32_t qp_number
+    $local struct QPInfo local_qp_info
+    $local struct QPInfo remote_qp_info
+    &call ibv_query_port, 1
+        local_qp_info.lid = $(attr).lid
+        local_qp_info.qp_number = $(qp)->qp_num
+
+
+subcode: ibv_finish
+    $call ibv_destroy_qp
+    $call ibv_destroy_cq
+    $call ibv_destroy_comp_channel
+    $call ibv_dereg_mr
+    $call ibv_dealloc_pd
+    $call ibv_close
+
+#---------------------------------------- 
 subcode: ibv_open(i_device)
     $local struct ibv_device ** device_list, n_device_list
     device_list = ibv_get_device_list(&n_device_list)
@@ -11,83 +48,93 @@ subcode: ibv_open(i_device)
     $if n_device_list<$(i_device)
         $call die, "ibv device #$(i_device) not exist"
 
-    $global struct ibv_context * g_ibv_ctx
-    g_ibv_ctx = ibv_open_device(device_list[$(i_device)])
-    $if !g_ibv_ctx
+    $global struct ibv_context * $(ctx)
+    $(ctx) = ibv_open_device(device_list[$(i_device)])
+    $if !$(ctx)
         $call die, "Failed to open ibv device #$(i_device)"
 
+    # $print ibv_open: opened device #$(i_device).
     $call @query_device_list
-
     ibv_free_device_list(device_list)
 
 subcode: ibv_close
-    ibv_close_device(g_ibv_ctx)
+    ibv_close_device($(ctx))
 
 # -------------------
 subcode: ibv_alloc_pd
-    $global struct ibv_pd * g_ibv_pd
-    g_ibv_pd = ibv_alloc_pd(g_ibv_ctx)
-    $if !g_ibv_pd
-        $call die, "Failed to allocate g_ibv_pd"
+    $global struct ibv_pd * $(pd)
+    $(pd) = ibv_alloc_pd($(ctx))
+    $if !$(pd)
+        $call die, "Failed to allocate $(pd)"
 
 subcode: ibv_dealloc_pd
-    ibv_dealloc_pd(g_ibv_pd)
+    ibv_dealloc_pd($(pd))
 
 # -------------------
 subcode: ibv_reg_mr(p, size)
-    $local struct ibv_mr * g_ibv_mr
+    $local struct ibv_mr * $(mr)
     $(set:flag=IBV_ACCESS_LOCAL_WRITE)
-    g_ibv_mr = ibv_reg_mr(g_ibv_pd, $(p), $(size), $(flag))
-    $if !g_ibv_mr
+    $(mr) = ibv_reg_mr($(pd), $(p), $(size), $(flag))
+    $if !$(mr)
         $call die, "Failed: ibv_reg_mr"
 
 subcode: ibv_dereg_mr
-    ibv_dereg_mr(g_ibv_mr)
+    ibv_dereg_mr($(mr))
 
 # -------------------
 subcode: ibv_create_comp_channel
-    $local struct ibv_comp_channel * g_ibv_chan
-    g_ibv_chan = ibv_create_comp_channel(g_ibv_ctx)
-    $if !g_ibv_chan
+    $local struct ibv_comp_channel * $(compchan)
+    $(compchan) = ibv_create_comp_channel($(ctx))
+    $if !$(compchan)
         $call die, "Failed: ibv_create_comp_channel"
 
 subcode: ibv_destroy_comp_channel
-    ibv_destroy_comp_channel(g_ibv_chan)
+    ibv_destroy_comp_channel($(compchan))
 
 # -------------------
 subcode: ibv_create_cq
-    $local struct ibv_cq * g_ibv_cq
-    g_ibv_cq = ibv_create_cq(g_ibv_ctx, 1024, NULL, g_ibv_chan, 0)
-    $if !g_ibv_cq
+    $local struct ibv_cq * $(cq)
+    $(cq) = ibv_create_cq($(ctx), 1024, NULL, $(compchan), 0)
+    $if !$(cq)
         $call die, "Failed: ibv_create_cq"
 
 subcode: ibv_destroy_cq
-    ibv_destroy_cq(g_ibv_cq)
+    ibv_destroy_cq($(cq))
 
 # -------------------
 subcode: ibv_create_qp
-    $local struct ibv_qp * g_ibv_qp
+    $local struct ibv_qp * $(qp)
     struct ibv_qp_init_attr init_attr = {
-        .send_cq = g_ibv_cq,
-        .recv_cq = g_ibv_cq,
+        .send_cq = $(cq),
+        .recv_cq = $(cq),
         .cap = {
             .max_send_wr = 1,
-            .max_recv_wr = rx_depth, 
+            .max_recv_wr = 1, 
             .max_send_sge = 1,
-            .max_recv_sge = 1 },
-        .qp_type = IBV_QPT_RC,
+            .max_recv_sge = 1,
+        },
+        .qp_type = IBV_QPT_RC, # RC, UC, UD
+        .sq_sig_all = 0, # decide by work request
     };
 
-    g_ibv_qp = ibv_create_qp(g_ibv_pd, &init_attr)
-    $if !g_ibv_qp
+    $(qp) = ibv_create_qp($(pd), &init_attr)
+    $if !$(qp)
         $call die, "Failed: ibv_create_qp"
 
 subcode: ibv_destroy_qp
-    ibv_destroy_qp(g_ibv_qp)
+    ibv_destroy_qp($(qp))
+
+# -------------------
+subcode: modify_qp(state)
+    $local struct ibv_qp_attr qp_attr
+    BLOCK
+    tn_ret = ibv_modify_qp($(qp), &qp_attr, $(mask))
+    $if tn_ret
+        $call die, "Failed to modify_qp to state $(state)"
 
 subcode: modify_qp_init
     &call modify_qp, init
-        qp_attr = {
+        qp_attr = (struct ibv_qp_attr){
             .qp_state = IBV_QPS_INIT,
             .pkey_index = 0,
             .port_num = 1,
@@ -97,14 +144,14 @@ subcode: modify_qp_init
 
 subcode: modify_qp_rtr
     &call modify_qp, rtr
-        qp_attr = {
+        qp_attr = (struct ibv_qp_attr){
             .qp_state = IBV_QPS_RTR,
             .path_mtu = IBV_MTU_4096,
-            .dest_qp_num = remote_qp_info.qp_num
+            .dest_qp_num = remote_qp_info.qp_number,
             .rq_psn = 0,
             .max_dest_rd_atomic = 1,
             .min_rnr_timer = 12,
-            .at_attr = {
+            .ah_attr = {
                 .is_global = 0,
                 .dlid = remote_qp_info.lid,
                 .sl = 0,
@@ -115,7 +162,7 @@ subcode: modify_qp_rtr
 
 subcode: modify_qp_rts
     &call modify_qp, rts
-        qp_attr = {
+        qp_attr = (struct ibv_qp_attr){
             .qp_state = IBV_QPS_RTS,
             .timeout = 14,
             .retry_cnt = 7,
@@ -125,13 +172,6 @@ subcode: modify_qp_rts
         };
         $(export:mask=IBV_QP_STATE|IBV_QP_TIMEOUT|IBV_QP_RETRY_CNT|IBV_QP_RNR_RETRY|IBV_QP_SQ_PSN|IBV_QP_MAX_QP_RD_ATOMIC)
 
-subcode: modify_qp(state)
-    $local struct ibv_qp_attr
-    BLOCK
-    tn_ret = ibv_modify_qp(g_ibv_qp, &qp_attr, $(mask))
-    $if tn_ret
-        $call die, "Failed to modify_qp to state $(state)"
-
 # -------------------
 subcode: ibv_query_port(i_port)
     $(set:attr=ibv_port_attr)
@@ -139,37 +179,48 @@ subcode: ibv_query_port(i_port)
     ibv_query_port($(ctx), $(i_port), &$(attr))
     BLOCK
 
-#---------------------------------------- 
+# -------------------------------- 
 subcode: ibv_post_wr(buf, size, send)
-    $local struct ibv_sge sg_list
-    sg_list = {
-        .addr = $(buf),
+    struct ibv_sge sg_list = {
+        .addr = (uint64_t)$(buf),
         .length = $(size),
-        .lkey = g_ibv_mr->lkey,
+        .lkey = $(mr)->lkey,
     };
-    $local struct ibv_$(send)_wr wr
-    wr = {
+    struct ibv_$(send)_wr wr = {
         .next = NULL,
         .sg_list = &sg_list,
         .num_sge = 1,
         $(if:send=send)
             .opcode = IBV_WR_SEND,
+            .send_flags = IBV_SEND_SIGNALED,
     };
-    $local struct ibv_$(send)_wr *p_bad_wr
-    tn_ret = ibv_post_$(send)(g_ibv_qp, &wr, &p_bad_wr)
+    $my struct ibv_$(send)_wr *p_bad_wr
+    tn_ret = ibv_post_$(send)($(qp), &wr, &p_bad_wr)
     $if tn_ret
         $call die, "Error: ibv_post_$(send)"
 
 subcode: ibv_send(buf, size)
     $call ibv_post_wr, $(buf), $(size), send
 
-subcode: ibc_recv(buf, size)
+subcode: ibv_recv(buf, size)
     $call ibv_post_wr, $(buf), $(size), recv
+
+# -------------------------------- 
+subcode: ibv_poll_cq
+    $my struct ibv_wc wc
+    $my int tn_comp = 0
+    $while tn_comp == 0
+        tn_comp = ibv_poll_cq($(cq), 1, &wc)
+        $if tn_comp>0
+            $print "[$mpi_id] got wc: qp_num=%d", wc.qp_num
+    $if tn_comp < 0
+        $call die, "Failed: ibv_poll_cq"
+    $if wc.status != IBV_WC_SUCCESS
+        $call die, "[$mpi_id] Error: ibv_poll_cq return failure"
 
 #---------------------------------------- 
 subcode: query_ibv_devices
     $call ibv_open, 0
-    $(set:ctx=g_ibv_ctx)
     $call @query_ctx
     &call @query_port, 1
         $print "  Port $(i_port)"
