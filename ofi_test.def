@@ -1,0 +1,37 @@
+include: c/mpi.def
+include: macros/ofi.def
+# WIP
+macros:
+    # dump_info: 1
+    debug: 1
+
+page: test, mpi_frame
+    module: c
+    CC: gcc -std=c99 -D_POSIX_C_SOURCE=200112L -g -L$HOME/MPI/lib
+    exe: mpiexec -np 2 out/test
+
+    setvbuf(stdout, NULL, _IONBF, 0)
+    $call ofi_hint
+    $call ofi_get_info
+
+    $(if:dump_info)
+        $call ofi_dump_infos, 1
+    $(else)
+        $call ofi_open
+        &call p2p_region, 0, 1
+            $call exchange, $(ofi_addr)
+            # $call ofi_dump_addr
+            $call ofi_set_addr
+
+            $(unset:tag)
+            $(if:is_p1)
+                $my int msg = 1234
+                $call ofi_send, &msg, 4
+            $(else)
+                $my int msg = 0
+                $call ofi_recv, &msg, 4
+                $dump msg
+
+    $(if:!dump_info)
+        $call ofi_close
+

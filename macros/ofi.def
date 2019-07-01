@@ -1,0 +1,293 @@
+subcode: _autoload
+    $include <rdma/fabric.h>
+    $include <rdma/fi_domain.h>
+    $include <rdma/fi_endpoint.h>
+    $include <rdma/fi_tagged.h>
+    $include <rdma/fi_cm.h> # fi_getname
+    $uselib -lfabric
+
+macros:
+    ep_type: FI_EP_DGRAM
+
+macros:
+    info: ofi_info
+    fabric: ofi_fabric
+    eq:  ofi_eq # event queue
+    domain: ofi_domain
+    mr: ofi_mr
+    tx_cq: ofi_tx_cq
+    rx_cq: ofi_rx_cq
+    ep: ofi_ep
+    av: ofi_av
+
+    buf: ofi_buf
+    recv_size: tn_alignment
+    buf_size: tn_alignment*2
+
+    TAG: 1
+
+#---------------------------------------- 
+subcode: ofi_hint
+    $my struct fi_info *hint
+    hint = fi_allocinfo()  # Need  fi_freeinfo(hint)
+    hint->ep_attr->type = FI_EP_DGRAM
+    hint->caps = FI_MSG
+    hint->mode = FI_CONTEXT | FI_CONTEXT2 | FI_MSG_PREFIX
+    hint->domain_attr->mr_mode = FI_MR_LOCAL | FI_MR_ALLOCATED | FI_MR_PROV_KEY | FI_MR_VIRT_ADDR
+    $(export:hint=hint)
+
+subcode: ofi_get_info
+    $(set:version=FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION))
+    $(set:node=NULL)
+    $(set:service=NULL)
+    $(if:!hint)
+        $(set:hint=NULL)
+    $my struct fi_info *$(info)
+    $fcall fi_getinfo($(version),$(node),$(service), 0, $(hint), &$(info))
+
+#---------------------------------------- 
+subcode: ofi_open
+    $(for:fabric,domain)
+        $global $($1): struct fid_$1 *
+    $fcall fi_fabric($(info)->fabric_attr, &$(fabric), NULL)
+    $fcall fi_domain($(fabric), $(info), &$(domain), NULL)
+    # $print "fabric: %p, domain: %p", $(fabric), $(domain)
+    
+    # event queue
+    $global $(eq): struct fid_eq *
+    $my struct fi_eq_attr eq_attr
+    memset(&eq_attr, 0, sizeof(eq_attr))
+    $fcall fi_eq_open($(fabric), &eq_attr, &$(eq), NULL)
+    # $print "eq: %p", $(eq)
+
+    # memory buffer
+    $include unistd
+    $(recv_size) = sysconf(_SC_PAGESIZE)
+    # $dump tn_alignment 4096
+    # assert tn_alignment > $(info)->tx_attr->size + $(info)->ep_attr->msg_prefix_size
+
+    $global $(buf), tx_buf, rx_buf: void *
+    $include stdlib
+    posix_memalign(&$(buf), tn_alignment, $(buf_size))
+    memset($(buf), 0, $(buf_size))
+    rx_buf = $(buf)
+    tx_buf = $(buf)+tn_alignment
+    # $print "rx_buf: %p, tx_buf: %p, size: %zd", rx_buf, tx_buf, $(recv_size)
+    $global int ofi_tx_prefix_size = 0
+    $global int ofi_rx_prefix_size = 0
+    $(for:tx,rx)
+        $if $(info)->$1_attr->mode & FI_MSG_PREFIX
+            ofi_$1_prefix_size = $(info)->ep_attr->msg_prefix_size
+
+    # memory registration
+    $global $(mr): struct fid_mr *
+    $if $(info)->domain_attr->mr_mode && FI_MR_LOCAL
+        $(set:MRKEY=0xC0DE)
+        fi_mr_reg($(domain), $(buf), $(buf_size), FI_SEND|FI_RECV, 0, $(MRKEY), 0, &$(mr), NULL)
+    $else
+        $global struct fid_mr no_mr
+        $(mr) = &no_mr
+    # $print "mr: %p", $(mr)
+
+    # completion queue
+    $global $(rx_cq), $(tx_cq): struct fid_cq *
+    $my struct fi_cq_attr cq_attr
+    memset(&cq_attr, 0, sizeof(cq_attr))
+    cq_attr.format = FI_CQ_FORMAT_CONTEXT
+    cq_attr.wait_obj = FI_WAIT_NONE
+    cq_attr.size = 0
+    $fcall fi_cq_open($(domain), &cq_attr, &$(tx_cq), &$(tx_cq))
+    $fcall fi_cq_open($(domain), &cq_attr, &$(rx_cq), &$(rx_cq))
+    # $print "rx_cq: %p [%d], tx_cq: %pi [%d]", $(rx_cq), $(info)->tx_attr->size, $(tx_cq), $(info)->rx_attr->size
+
+    # $if $(info)->ep_attr->type == FI_EP_{RDM,DGRAM}
+    $global $(av): struct fid_av *
+    $my struct fi_av_attr av_attr
+    memset(&av_attr, 0, sizeof(av_attr))
+    av_attr.type = $(info)->domain_attr->av_type
+    $fcall fi_av_open($(domain), &av_attr, &$(av), NULL)
+    # $print "av: %p", $(av)
+
+    # init endpoint
+    $global $(ep): struct fid_ep *
+    $fcall fi_endpoint($(domain), $(info), &$(ep), NULL)
+    # $print "ep: %p", $(ep)
+
+    $(if:ep_type=FI_EP_MSG)
+        fi_ep_bind($(ep), &$(eq)->fid, 0)
+    $(for:$(av),$(tx_cq),$(rx_cq) and 0, FI_TRANSMIT, FI_RECV)
+        # $print bind $1 to ep with $2...
+        $fcall fi_ep_bind($(ep), &$1->fid, $2)
+    $fcall fi_enable($(ep))
+
+    $(if:0)
+        # post recv buffer
+        $fcall fi_recv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, &rx_ctx)
+
+    # 
+    $(set:NAMELEN=1024)
+    $global unsigned char ofi_local_name[$(NAMELEN)]
+    $global unsigned char ofi_remote_name[$(NAMELEN)]
+    $local size_t namelen=0
+    $(set:fid=(struct fid *)$(ep))
+    tn_ret = fi_getname($(fid), NULL, &namelen)
+    # $print "namelength: %zd", namelen
+    assert(tn_ret==-FI_ETOOSMALL && namelen<$(NAMELEN))
+    $fcall fi_getname($(fid), ofi_local_name, &namelen)
+    # $print "name: $(x32:%02x)...", $(join:ofi_local_name[*]:,:0-31)
+
+    # For simplicity, lets assume the same namelen, add_format ...
+    $(export:ofi_addr=ofi_local_name, ofi_remote_name, namelen)
+
+subcode: ofi_dump_addr
+    $print "[$mpi_id]  local_addr: $(x32:%02x)...", $(join:ofi_local_name[*]:,:0-31)
+    $print "[$mpi_id] remote_addr: $(x32:%02x)...", $(join:ofi_remote_name[*]:,:0-31)
+
+subcode: ofi_set_addr
+    # connection-less endpoint
+    $global ofi_local_addr, ofi_remote_addr: fi_addr_t
+    $(for:local,remote)
+        tn_ret = fi_av_insert($(av), ofi_$1_name, 1, &ofi_$1_addr, 0, NULL)
+        assert(tn_ret==1)
+
+
+subcode: ofi_close
+    $(if:hint)
+        fi_freeinfo($(hint))
+    $if $(info)
+        fi_freeinfo($(info))
+    $(for:ep, rx_cq, tx_cq, av, eq, domain, fabric)
+        fi_close((struct fid *)$($1))
+    free($(buf))
+    $if $(mr)!=&no_mr
+        fi_close((struct fid *)$(mr))
+
+#---------------------------------------- 
+subcode: _autoload
+    $global tx_ctx, rx_ctx: struct fi_context2
+
+subcode: ofi_send(msg, size)
+    $(if:0)
+        $(if:tag)
+            fi_tinject($(ep), $(msg), $(size), ofi_remote_addr, $(tag))
+        $(else)
+            fi_inject($(ep), $(msg), $(size), ofi_remote_addr)
+    $(else)
+        memcpy(tx_buf+ofi_tx_prefix_size, $(msg), $(size))
+        fi_send($(ep), tx_buf, $(size), fi_mr_desc($(mr)), ofi_remote_addr, &tx_ctx)
+    ofi_get_cq_comp($(tx_cq), 1)
+
+subcode: ofi_recv(msg, size)
+    $(if:tag)
+        fi_trecv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, $(tag), 0, &rx_ctx)
+    $(else)
+        fi_recv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, &rx_ctx)
+    ofi_get_cq_comp($(rx_cq), 1)
+    $my unsigned char * b=rx_buf
+    # $print "[$mpi_id] got cq_comp, header=%d: [$(x8:%02x)]", ofi_rx_prefix_size, $(join:b[*]:,:0-7)
+    memcpy($(msg), rx_buf+ofi_rx_prefix_size, $(size))
+        
+#---------------------------------------- 
+fncode: ofi_gettime_us: int
+    $include sys/time.h
+    $local struct timeval t
+    gettimeofday(&t, NULL)
+    return t.tv_sec * 1000000 + t.tv_usec
+
+fncode: ofi_get_cq_comp(struct fid_cq *cq, uint64_t total) : int
+    $local int time_start
+    time_start = ofi_gettime_us()
+    tn_cnt = 0
+    $dowhile tn_cnt < total
+        $local struct fi_cq_err_entry comp
+        tn_ret = fi_cq_read(cq, &comp, 1)
+        $if tn_ret > 0
+            tn_cnt++
+            time_start = ofi_gettime_us()
+        $elif tn_ret == -FI_EAVAIL
+            # pp_cq_readerr(cq)
+            tn_cnt++
+        $elif tn_ret == -FI_EAGAIN
+            # $dump(fi_cq_read) tn_ret
+            $(if:0)
+                $if (ofi_gettime_us() - time_start) > timeout_sec*1000000
+                    # time out
+                    return -FI_ENODATA
+        $else
+            return tn_ret
+    return 0
+
+#---- DUMP INFO ---------------------------- 
+subcode: ofi_dump_infos(N)
+    $list addr_format, dump_nic
+    i = 0
+    $while $(info)!=NULL
+        $call dump_info
+        $(info) = $(info)->next
+        i++
+        $if i>=$(N)
+            break
+
+subcode: dump_info
+    $print "fi #$i:"
+    $print "    caps: %llx", $(info)->caps
+    $print "    src_addr: %p", $(info)->src_addr
+    # $print "    dest_addr: %p", $(info)->dest_addr
+    # $print "    addrfmt: %s", addr_format($(info)->addr_format)
+    $if $(info)->fabric_attr
+        $(set:a=$(info)->fabric_attr->$1)
+        $print "    fabric_attr: name=%s, prov=%s, ver=0x%x", $(a:name), $(a:prov_name), $(a:prov_version)
+
+    $if $(info)->domain_attr
+        $(set:a=$(info)->domain_attr->$1)
+        $print "    domain_attr:"
+        $(for:threading,control_progress,data_progress, resource_mgmt, av_type, mr_mode)
+            $print "    : $1 = 0x%x", $(a:$1)
+        $(for:mr_key_size,cq_data_size,cq_cnt, ep_cnt,tx_ctx_cnt,rx_ctx_cnt,max_ep_tx_ctx, max_ep_rx_ctx, max_ep_stx_ctx, max_ep_srx_ctx)
+            $print "    : $1 = %zd", $(a:$1)
+
+    $if $(info)->ep_attr
+        $(set:a=$(info)->ep_attr->$1)
+        $print "    ep_attr:"
+        $(for:max_msg_size, msg_prefix_size, max_order_raw_size, max_order_war_size, max_order_waw_size)
+            $print "    : $1 = 0x%zx", $(a:$1)
+
+    $if $(info)->tx_attr
+        $(set:a=$(info)->tx_attr->$1)
+        $print "    tx_attr: size=%zd iov_limit=%zd inject_size=%zd", $(a:size), $(a:iov_limit), $(a:inject_size)
+    $if $(info)->rx_attr
+        $(set:a=$(info)->rx_attr->$1)
+        $print "    rx_attr: size=%zd iov_limit=%zd", $(a:size), $(a:iov_limit)
+
+    $if $(info)->nic
+        dump_nic($(info)->nic)
+
+fncode: addr_format(uint32_t fmt): const char *
+    $(for:SOCKADDR,SOCKADDR_IN,SOCKADDR_IN6,SOCKADDR_IB,ADDR_PSMX,ADDR_GNI,ADDR_STR)
+        $case fmt==FI_$1
+            return "FI_$1"
+    $else
+        return "FI_FORMAT_UNSPEC"
+
+fncode: av_type(int type): const char *
+    $(for:MAP,TABLE)
+        $case type==FI_AV_$1
+            return "FI_AV_$1"
+
+fncode: dump_nic(struct fid_nic* nic)
+    $print "    nic:"
+    $print "    : name: %s", nic->device_attr->name
+    $if nic->link_attr
+        # $print "    : address: %s", nic->link_attr->address
+        $print "    : type: %s", nic->link_attr->network_type
+        $print "    : mtu: %d", nic->link_attr->mtu
+        $print "    : speed: %d", nic->link_attr->speed
+
+#---------------------------------------- 
+subcode: _autoload
+    $plugin fcall
+
+subcode: fcall(@F)
+    tn_ret = $(F)
+    $if tn_ret
+        $call die, "Failed: $(F), error: $tn_ret"
