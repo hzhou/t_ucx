@@ -14,11 +14,14 @@ macros:
     fabric: ofi_fabric
     eq:  ofi_eq # event queue
     domain: ofi_domain
-    mr: ofi_mr
     tx_cq: ofi_tx_cq
     rx_cq: ofi_rx_cq
     ep: ofi_ep
     av: ofi_av
+
+    mr: ofi_mr
+    # mr_desc: fi_mr_desc($(mr))
+    mr_desc: NULL
 
     buf: ofi_buf
     recv_size: tn_alignment
@@ -122,7 +125,7 @@ subcode: ofi_open
 
     $(if:0)
         # post recv buffer
-        $fcall fi_recv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, &rx_ctx)
+        $fcall fi_recv($(ep), rx_buf, $(recv_size), $(mr_desc), 0, &rx_ctx)
 
     # 
     $(set:NAMELEN=1024)
@@ -174,14 +177,14 @@ subcode: ofi_send(msg, size)
             fi_inject($(ep), $(msg), $(size), ofi_remote_addr)
     $(else)
         memcpy(tx_buf+ofi_tx_prefix_size, $(msg), $(size))
-        fi_send($(ep), tx_buf, $(size), fi_mr_desc($(mr)), ofi_remote_addr, &tx_ctx)
+        fi_send($(ep), tx_buf, $(size), $(mr_desc), ofi_remote_addr, &tx_ctx)
     ofi_get_cq_comp($(tx_cq), 1)
 
 subcode: ofi_recv(msg, size)
     $(if:tag)
-        fi_trecv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, $(tag), 0, &rx_ctx)
+        fi_trecv($(ep), rx_buf, $(recv_size), $(mr_desc), 0, $(tag), 0, &rx_ctx)
     $(else)
-        fi_recv($(ep), rx_buf, $(recv_size), fi_mr_desc($(mr)), 0, &rx_ctx)
+        fi_recv($(ep), rx_buf, $(recv_size), $(mr_desc), 0, &rx_ctx)
     ofi_get_cq_comp($(rx_cq), 1)
     $my unsigned char * b=rx_buf
     # $print "[$mpi_id] got cq_comp, header=%d: [$(x8:%02x)]", ofi_rx_prefix_size, $(join:b[*]:,:0-7)
